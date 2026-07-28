@@ -1,61 +1,18 @@
 import telebot
-from telebot import types
 
 TOKEN = "8618711572:AAHTpbMmTbTvIyV0mSh838gRxb_sPXTgKWg"
-
+bot = telebot.TeleBot(TOKEN)
 
 
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
-  user_name = message.from_user.first_name
-
-  markup = types.InlineKeyboardMarkup(row_width=2)
-  item1 = types.InlineKeyboardButton("🛒 Аккаунты PUBG", callback_data="accounts")
-  item2 = types.InlineKeyboardButton("💼 Metro Royale", callback_data="metro")
-  item3 = types.InlineKeyboardButton("🤝 Продать нам", callback_data="sell")
-  item4 = types.InlineKeyboardButton(
-      "📞 Связь с админом", url="https://t.me/pubgertjk3"
-  )
-  markup.add(item1, item2, item3, item4)
-
-  welcome_text = (
-      f"Привет, {user_name}! Добро пожаловать в Solostore.ru 🎮🔥\n\n"
-      "Здесь вы можете приобрести аккаунты, лут и редкие вещи PUBG Mobile, "
-      "а также продать свои. Выберите нужный раздел в меню ниже:"
-  )
-
+def start(message):
   bot.send_message(
-      message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=markup
+      message.chat.id,
+      f"Привет, {message.from_user.first_name}! Добро пожаловать в Solostore.ru"
+      " 🎮",
   )
-
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_inline(call):
-  if call.data == "accounts":
-    bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
-        "🛒 Аккаунты PUBG Mobile:\n\nВ данный момент доступные аккаунты:\n1. "
-        "Аккаунт со скинами — Цена: Уточняйте у админа.\n2. Завоеватель — Цена: "
-        "Уточняйте у админа.\n\nДля покупки напишите администратору.",
-    )
-  elif call.data == "metro":
-    bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
-        "💼 Metro Royale (Вещи и валюта):\n\nЗдесь вы можете приобрести игровую "
-        "валюту, снаряжение и стволы. Уточняйте наличие у админа!",
-    )
-  elif call.data == "sell":
-    bot.answer_callback_query(call.id)
-    bot.send_message(
-        call.message.chat.id,
-        "🤝 Продажа нам:\n\nХотите продать свой аккаунт или вещи? Скиньте "
-        "скриншоты и описание нашему администратору!",
-    )
 
 
 if __name__ == "__main__":
-  print("Бот Solostore.ru успешно запущен и работает...")
   bot.infinity_polling()
   
