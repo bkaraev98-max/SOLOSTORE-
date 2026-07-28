@@ -19,12 +19,8 @@ def send_welcome(message):
       "📞 Связь с админом", url="https://t.me/pubgertjk3"
   )
 
-  markup.add(item1, item2, item3, item4)
-
-  welcome_text = (
-      f"Привет,import telebot
-
-TOKEN = "TOKEN_IN_SHO_INJA_BOSHAD"
+  
+TOKEN = "8618711572:AAHYOHM0f4nG-r0VZp3PsuaUI7m5N63Z8ow"
 bot = telebot.TeleBot(TOKEN)
 
 @bot.message_handler(commands=['start'])
