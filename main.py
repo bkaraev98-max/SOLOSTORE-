@@ -3,7 +3,7 @@ from telebot import types
 import re
 
 # Токени нав ва маълумоти ту
-TOKEN = "8968261391:AAFuwAUaQjx35OqrtKlNjNdcj6cvLiHEll8"
+TOKEN = "8934022770:AAEstorPqKu75e1FvaiZ__PUR2W3mh8Q5HU"
 ADMIN_USERNAME = "@xs_anush19"
 CHANNEL_SHOP = "https://t.me/ANUSHuc_SHOP"
 CHANNEL_REVIEWS = "https://t.me/zvezdaotviz"
@@ -12,7 +12,7 @@ GROUP_CHAT = "https://t.me/chatanush"
 bot = telebot.TeleBot(TOKEN)
 
 # Рӯйхати калимаҳои қабеҳ/дашномҳо барои назорати гурӯҳ (метавонӣ зиёд кунӣ)
-BAD_WORDS = ["ҷлаб", "кун", "мунҷ", "матти", "harom", "suk", "durto", "pidar", "blyat", "nahuj", "ebal"]
+BAD_WORDS = ["ҷлаб", "кун", "мунҷ", "матти", "harom", "sukа", "durto", "pidar", "blyat", "nahuj", "ebal","очата мегом"]
 
 # ---------------------------------------------------------
 # 1. ҚИСМИ ЧАТИ ШАХСӢ (PRIVATE CHAT) & START
@@ -154,4 +154,3 @@ def private_smart_responder(message):
 # Оғози кор ва чопи ҳолат дар консол
 print("Бот бо қувваи пурра ва системаи муҳофизати гурӯҳ ба кор даромад...")
 bot.infinity_polling()
-                                   
