@@ -1,196 +1,72 @@
+import asyncio
 import logging
-import telebot
-from telebot import types
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
-# ==========================
-# SOLOSTORE.TJ BOT
-# ==========================
+# Токени боти худро аз BotFather инҷо гузоред
+TOKEN = "8171911240:AAHBabUEVQ_bpSNodobCBCyCx3FR1jiBN_E"
 
-TOKEN = "8908899314:AAHUmMAHJPr14TQmb0x_wdi9tf9vRxXe_ko"
+# Танзимоти холатҳо (FSM) барои қабули номи суруд аз корбар
+class MusicState(StatesGroup):
+    waiting_for_prompt = State()
 
-bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 
-logging.basicConfig(
-    level=logging.INFO, format="[%(asctime)s] %(levelname)s - %(message)s"
-)
+# Командаи /start
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "👋 Салом! Хуш омадед ба боти сурудсози мо.\n\n"
+        "🎶 Барои эҷод кардани мусиқӣ лутфан тугмаи поёнро пахш кунед ё фармони /create-ро фиристед."
+    )
+    # Намоиши тугмаи оддӣ
+    keyboard = types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text="🎵 Эҷод кардани мусиқӣ")]],
+        resize_keyboard=True
+    )
+    await message.answer("Барои оғоз тугмаро зер кунед:", reply_markup=keyboard)
 
-ADMIN = "@pubgertjk3"
-
-UC_CHANNEL = "https://t.me/soloucstore"
-METRO_CHANNEL = "https://t.me/metrosolostore"
-ACCOUNT_CHANNEL = "https://t.me/solostoretj"
-GROUP = "https://t.me/solostoretj"
-
-
-def home_menu():
-  markup = types.InlineKeyboardMarkup(row_width=1)
-
-  markup.add(
-      types.InlineKeyboardButton("💎 BUY UC", callback_data="uc"),
-      types.InlineKeyboardButton("⚔️ METRO ROYALE", callback_data="metro"),
-      types.InlineKeyboardButton("🛒 BUY ACCOUNT", url=ACCOUNT_CHANNEL),
-      types.InlineKeyboardButton("💰 SELL ACCOUNT", callback_data="sell"),
-      types.InlineKeyboardButton("👥 SOLOSTORE.TJ", url=GROUP),
-      types.InlineKeyboardButton("👑 OWNER", url="https://t.me/pubgertjk3"),
-  )
-
-  return markup
-
-
-def back():
-  markup = types.InlineKeyboardMarkup()
-  markup.add(types.InlineKeyboardButton("⬅️ BACK", callback_data="home"))
-  return markup
-
-
-WELCOME = """
-🎮 *Добро пожаловать в SOLOSTORE.TJ*
-
-🔥 Лучший магазин PUBG Mobile
-
-━━━━━━━━━━━━━━━
-
-💎 Пополнение UC
-
-⚔️ METRO ROYALE
-
-🛒 Покупка аккаунтов
-
-💰 Продажа аккаунтов
-
-🛡 Гарантия безопасности
-
-⚡ Быстро
-⚡ Надёжно
-⚡ Без обмана
-
-━━━━━━━━━━━━━━━
-
-👇 Выберите нужный раздел.
-"""
-
-
-@bot.message_handler(commands=["start"])
-def start(message):
-  bot.send_message(message.chat.id, WELCOME, reply_markup=home_menu())
-
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback(call):
-  if call.data == "home":
-    bot.edit_message_text(
-        WELCOME,
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=home_menu(),
+# Оғози сохтани мусиқӣ
+@dp.message(F.text == "🎵 Эҷод кардани мусиқӣ")
+@dp.message(Command("create"))
+async def start_music_creation(message: types.Message, state: FSMContext):
+    await state.set_state(MusicState.waiting_for_prompt)
+    await message.answer(
+        "✍️ Мавзӯъ, услуб ё матни кӯтоҳи сурудеро, ки хоҳед эҷод кунед, нависед:\n"
+        "(Масалан: *Трэк дар бораи мошинҳо ва шаб, услуби рэп*)"
     )
 
-  elif call.data == "uc":
-    text = """
-💎 *ПОКУПКА UC*
-
-━━━━━━━━━━━━━━━
-
-✅ Моментальное пополнение
-
-✅ Любое количество UC
-
-✅ Гарантия безопасности
-
-✅ Лучшие цены
-
-━━━━━━━━━━━━━━━
-
-👇 Выберите действие.
-"""
-
-    markup = types.InlineKeyboardMarkup(row_width=1)
-
-    markup.add(
-        types.InlineKeyboardButton("💎 UC CHANNEL", url=UC_CHANNEL),
-        types.InlineKeyboardButton(
-            "👑 НАПИСАТЬ ВЛАДЕЛЬЦУ", url="https://t.me/pubgertjk3"
-        ),
-        types.InlineKeyboardButton("⬅️ BACK", callback_data="home"),
+# Қабули дархост ва тавлиди суруд
+@dp.message(MusicState.waiting_for_prompt)
+async def process_music_prompt(message: types.Message, state: FSMContext):
+    user_prompt = message.text
+    
+    # Хабар медиҳем, ки ҷараёни омодасозӣ рафта истодааст
+    waiting_msg = await message.answer("⏳ Мусиқии шумо дар ҳоли эҷод шудан аст... Лутфан чанд лаҳза интизор шавед 🎧")
+    
+    # Инҷо дар оянда метавонед ботро ба API-и сурудсози AI (монанди Suno ё дигарҳо) пайваст кунед.
+    # Ҳоло бошад, барои намуна мо паёми тасдиқӣ ва суруди тестоӣ мефиристем:
+    
+            await asyncio.sleep(3) # Хунуккунии сунъӣ барои намоиши ҷараён
+    
+    await bot.delete_message(chat_id=message.chat.id, message_id=waiting_msg.message_id)
+    
+    await message.answer(
+        f"✅ **Мусиқии шумо бо муваффақият омода шуд!**\n\n"
+        f"🔍 **Дархости шумо:** *{user_prompt}*\n\n"
+        "🎶 *(Дар ин ҷо бот файли аудиоии MP3-ро мефиристад, вақте API-и сурудсоз пайваст карда мешавад)*"
     )
+    
+    await state.clear()
 
-    bot.edit_message_text(
-        text, call.message.chat.id, call.message.message_id, reply_markup=markup
-    )
+async def main():
+    await dp.start_polling(bot)
 
-  elif call.data == "metro":
-    text = """
-⚔️ *METRO ROYALE*
-
-━━━━━━━━━━━━━━━
-
-🔥 Сопровождение
-
-💰 Фарм валюты
-
-🎒 Лучший лут
-
-🛡 Безопасная игра
-
-━━━━━━━━━━━━━━━
-
-👇 Выберите действие.
-"""
-
-    markup = types.InlineKeyboardMarkup(row_width=1)
-
-    markup.add(
-        types.InlineKeyboardButton(
-            "⚔️ METRO ROYALE CHANNEL", url=METRO_CHANNEL
-        ),
-        types.InlineKeyboardButton("👑 ЗАКАЗАТЬ", url="https://t.me/pubgertjk3"),
-        types.InlineKeyboardButton("⬅️ BACK", callback_data="home"),
-    )
-
-    bot.edit_message_text(
-        text, call.message.chat.id, call.message.message_id, reply_markup=markup
-    )
-
-  elif call.data == "sell":
-    text = """
-💰 *ПРОДАЖА АККАУНТА*
-
-━━━━━━━━━━━━━━━
-
-Хотите быстро продать аккаунт PUBG Mobile?
-
-📸 Отправьте:
-
-• Скриншоты
-
-• Описание
-
-• Желаемую цену
-
-━━━━━━━━━━━━━━━
-
-👇 Напишите владельцу.
-"""
-
-    markup = types.InlineKeyboardMarkup(row_width=1)
-
-    markup.add(
-        types.InlineKeyboardButton(
-            "👑 НАПИСАТЬ ВЛАДЕЛЬЦУ", url="https://t.me/pubgertjk3"
-        ),
-        types.InlineKeyboardButton("⬅️ BACK", callback_data="home"),
-    )
-
-    bot.edit_message_text(
-        text, call.message.chat.id, call.message.message_id, reply_markup=markup
-    )
-
-  bot.answer_callback_query(call.id)
-
-
-print("===================================")
-print("      SOLOSTORE.TJ BOT ONLINE")
-print("===================================")
-
-bot.infinity_polling(skip_pending=True)
+if __name__ == "__main__":
+    asyncio.run(main())
     
