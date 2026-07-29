@@ -6,7 +6,7 @@ from telebot import types
 # SOLOSTORE.TJ BOT
 # ==========================
 
-TOKEN = "8171911240:AAHBabUEVQ_bpSNodobCBCyCx3FR1jiBN_E"
+TOKEN = "8908899314:AAHUmMAHJPr14TQmb0x_wdi9tf9vRxXe_ko"
 
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 
