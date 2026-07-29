@@ -52,7 +52,8 @@ async def process_music_prompt(message: types.Message, state: FSMContext):
     # Инҷо дар оянда метавонед ботро ба API-и сурудсози AI (монанди Suno ё дигарҳо) пайваст кунед.
     # Ҳоло бошад, барои намуна мо паёми тасдиқӣ ва суруди тестоӣ мефиристем:
     
-            await asyncio.sleep(3) # Хунуккунии сунъӣ барои намоиши ҷараён
+    await asyncio.sleep(3) # Хунуккунии сунъӣ...
+    
     
     await bot.delete_message(chat_id=message.chat.id, message_id=waiting_msg.message_id)
     
