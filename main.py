@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # Токени боти худро аз BotFather инҷо гузоред
-TOKEN = "8171911240:AAHBabUEVQ_bpSNodobCBCyCx3FR1jiBN_E"
+TOKEN = "8744903753:AAFC1DyO9PZdVUzmKobpHOnGBcS6T7rzaTA"
 
 # Танзимоти холатҳо (FSM) барои қабули номи суруд аз корбар
 class MusicState(StatesGroup):
