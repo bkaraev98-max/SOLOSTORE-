@@ -1,78 +1,86 @@
-import telebot
-from telebot import types
+import random
+import string
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-TOKEN = "8470175020:AAGQKuU7Sx2x57ySrVc1vuCMyuQkIH2Qglg"
-ADMIN_USERNAME = "@xs_anush19"
-CHANNEL_SHOP = "https://t.me/ANUSHuc_SHOP"
-CHANNEL_REVIEWS = "https://t.me/zvezdaotviz"
-GROUP_CHAT = "https://t.me/chatanush"
+# Токени боти худро аз @BotFather гирифта инҷо монед
+API_TOKEN = "8171911240:AAHBabUEVQ_bpSNodobCBCyCx3FR1jiBN_E"
 
-bot = telebot.TeleBot(TOKEN)
+logging.basicConfig(level=logging.INFO)
 
-FORBIDDEN_WORDS = [
-    "очата мегом", "мегомта", "сука", "да даҳат мегом", 
-    "кси апа", "кси хоҳар", "хоҳарта гом", "ҷлаб", "кун", 
-    "мунҷ", "harom", "suk", "durto", "pidar", "blyat", 
-    "nahuj", "ebal", "блять", "ебать", "хуй", "пидор"
-]
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
 
-@bot.message_handler(commands=['start'])
-def start_cmd(message):
-    if message.chat.type != 'private':
-        return
-    name = message.from_user.first_name
-    text = (
-        f"Салом, ҳурматли {name}!\n\n"
-        f"Хуш омадед ба маркази хизматрасонии мо. Ман ёвари худкори шумо ҳастам.\n\n"
-        f"Платформаҳои расмии мо:\n"
-        f"• Канали дӯкон: {CHANNEL_SHOP}\n"
-        f"• Канали отзивҳо: {CHANNEL_REVIEWS}\n"
-        f"• Гурӯҳи муҳокима: {GROUP_CHAT}\n\n"
-        f"Агар саволе дошта бошед, ба владелетс {ADMIN_USERNAME} муроҷиат кунед!"
-    )
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("Канали Дӯкон", url=CHANNEL_SHOP),
-        types.InlineKeyboardButton("Отзивҳо", url=CHANNEL_REVIEWS),
-        types.InlineKeyboardButton("Гурӯҳи Чат", url=GROUP_CHAT),
-        types.InlineKeyboardButton("Владелетс", url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}")
-    )
-    bot.send_message(message.chat.id, text, reply_markup=markup)
-
-@bot.message_handler(content_types=['new_chat_members'])
-def new_member(message):
-    for user in message.new_chat_members:
-        bot.send_message(
-            message.chat.id,
-            f"Салом, {user.first_name}! Хуш омадед ба гурӯҳи мо.\n"
-            f"Қоида: Дар гурӯҳ навиштани дашном ва суханҳои қабеҳ қатъиян манъ аст!\n"
-            f"Админ: {ADMIN_USERNAME}"
-        )
-
-@bot.message_handler(func=lambda msg: msg.chat.type in ['group', 'supergroup'])
-def group_handler(message):
-    if not message.text:
-        return
-    txt = message.text.lower()
+# Функция барои сохтани калиди тасодуфӣ мисли ZOLO-1DTrial-XTUlshcNgq9i
+def generate_zolo_key(days: int):
+    # Муайян кардани намуди муҳлат дар ключ
+    if days == 7:
+        duration_str = "7DTrial"
+    elif days == 60:
+        duration_str = "60DTrial"
+    else:
+        duration_str = f"{days}DTrial"
+        
+    # Сохтани қисми тасодуфии ключ (харфҳо ва рақамҳо)
+    letters_and_digits = string.ascii_letters + string.digits
+    random_part = ''.join(random.choice(letters_and_digits) for _ in range(16))
     
-    for word in FORBIDDEN_WORDS:
-        if word in txt:
-            try:
-                bot.delete_message(message.chat.id, message.message_id)
-                bot.send_message(message.chat.id, f"{message.from_user.first_name}, истифодаи суханҳои қабеҳ манъ аст!")
-            except:
-                pass
-            return
+    # Муттаҳид кардани қисмҳо ба формати лозима
+    key = f"ZOLO-{duration_str}-{random_part}"
+    return key
 
-    if "ануш" in txt:
-        bot.reply_to(message, f"Диққат! Касе номи Ануш-ро гирифт! Владелетс: {ADMIN_USERNAME}")
-        return
+# Менюи асосӣ бо тугмаҳо
+def get_main_menu():
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton("🔑 Гирифтани ключи 7 рӯза", callback_data="get_7d"),
+        InlineKeyboardButton("🔑 Гирифтани ключи 60 рӯза", callback_data="get_60d")
+    )
+    return keyboard
 
-@bot.message_handler(func=lambda msg: msg.chat.type == 'private')
-def private_handler(message):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("Навиштан ба Владелетс", url=f"https://t.me/{ADMIN_USERNAME.lstrip('@')}"))
-    bot.reply_to(message, f"Паёми шумо қабул шуд! Барои маълумоти пурра ба владелетс {ADMIN_USERNAME} нависед.", reply_markup=markup)
+# Фармони /start
+@dp.message_handler(commands=['start'])
+async def send_welcome(message: types.Message):
+    welcome_text = (
+        f"Салом, **{message.from_user.first_name}**! 👋\n\n"
+        "Ин боти ройгони тавлиди ключҳои **Zolocheat** аст.\n"
+        "Барои гирифтани ключ тугмаи лозимиро зер пахш кунед:"
+    )
+    await message.answer(welcome_text, parse_mode="Markdown", reply_markup=get_main_menu())
 
-print("Бот ба кор оғоз кард...")
-bot.infinity_polling(skip_pending=True)
+# Коркарди тугмаҳо (Callback queries)
+@dp.callback_query_handler(lambda c: c.data in ['get_7d', 'get_60d'])
+async def process_key_generation(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    
+    # Муайян кардани рӯзҳо вобаста ба тугмаи пахшшуда
+    if callback_query.data == 'get_7d':
+        days = 7
+    elif callback_query.data == 'get_60d':
+        days = 60
+    else:
+        days = 7
+
+    # Тавлиди ключ
+    new_key = generate_zolo_key(days)
+    
+    # Фиристодани ключ ба корбар
+    response_text = (
+        f"✅ **Ключи шумо омода аст!**\n\n"
+        f"`{new_key}`\n\n"
+        f"Мӯҳлат: **{days} рӯз**\n"
+        f"⚠️ *Эзоҳ: Ин ключҳо ройгон ва тасодуфӣ тавлид шудаанд.*"
+    )
+    
+    await bot.send_message(
+        callback_query.from_user.id, 
+        response_text, 
+        parse_mode="Markdown", 
+        reply_markup=get_main_menu()
+    )
+
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
+        
