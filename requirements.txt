@@ -1,4 +1,4 @@
-import random:@masterKEYS_bot
+import random
 import string
 import telebot
 from telebot import types
