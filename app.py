@@ -1,83 +1,847 @@
-import os
+import asyncio
+import html
 import logging
-from aiohttp import web
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+import os
+import secrets
+import sqlite3
+from contextlib import closing
+from datetime import datetime, timezone
+
+from aiohttp import web, ClientSession, ClientTimeout
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, CommandStart
+from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-logging.basicConfig(level=logging.INFO)
 
-TOKEN ="8724923696:AAH11sbD8L1oK6q45-PFtSxfplCHsgMNJLU"
-ADMIN_ID ="123456789" # ID-и соҳиби бот ё фурӯшанда
-PROFIT_MARGIN = 2.0 # 2 сомонӣ фойда барои соҳиби бот
+# ============================================================
+# CONFIG
+# ============================================================
 
-bot = Bot(token=TOKEN)
-dp = Dispatcher()
+MASTER_BOT_TOKEN = os.getenv("MASTER_BOT_TOKEN", "").strip()
 
-# Базаи оддии хотира барои нигоҳ доштани баланси корбарон
-user_balances = {}
+try:
+    MASTER_ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+except ValueError:
+    MASTER_ADMIN_ID = 0
 
-class BuyState(StatesGroup):
-    waiting_for_pubg_id = State()
-    waiting_for_withdrawal_amount = State()
+BASE_URL = os.getenv("BASE_URL", "").rstrip("/")
+PORT = int(os.getenv("PORT", "10000"))
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    builder = InlineKeyboardBuilder()
-    builder.button(text="💰 Баланси ман", callback_data="balance")
-    builder.button(text="🛒 Харидани UC", callback_data="buy_uc")
-    builder.button(text="💸 Вивест (Бароваrтани пул)", callback_data="withdraw")
-    builder.adjust(1)
-    
+DB_FILE = os.getenv("DB_FILE", "database.db")
+
+WEBHOOK_SECRET = os.getenv(
+    "WEBHOOK_SECRET",
+    secrets.token_urlsafe(32)
+)
+
+WEBHOOK_PATH_PREFIX = "/webhook"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+log = logging.getLogger("master-system")
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+db = sqlite3.connect(DB_FILE, check_same_thread=False)
+db.row_factory = sqlite3.Row
+
+db.execute("""
+CREATE TABLE IF NOT EXISTS managed_bots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token TEXT NOT NULL UNIQUE,
+    telegram_id INTEGER NOT NULL UNIQUE,
+    username TEXT,
+    first_name TEXT,
+    admin_id INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    webhook_secret TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+""")
+
+db.commit()
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def db_add_bot(
+    token: str,
+    telegram_id: int,
+    username: str | None,
+    first_name: str | None,
+):
+    secret = secrets.token_urlsafe(24)
+
+    with closing(db.cursor()) as cur:
+        cur.execute("""
+            INSERT INTO managed_bots
+            (
+                token,
+                telegram_id,
+                username,
+                first_name,
+                admin_id,
+                enabled,
+                webhook_secret,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, NULL, 1, ?, ?, ?)
+        """, (
+            token,
+            telegram_id,
+            username,
+            first_name,
+            secret,
+            now(),
+            now(),
+        ))
+
+        db.commit()
+
+        return cur.lastrowid
+
+
+def db_get_bot(bot_id: int):
+    return db.execute(
+        "SELECT * FROM managed_bots WHERE id = ?",
+        (bot_id,)
+    ).fetchone()
+
+
+def db_get_all_bots():
+    return db.execute("""
+        SELECT *
+        FROM managed_bots
+        ORDER BY id DESC
+    """).fetchall()
+
+
+def db_search_bots(query: str):
+    q = f"%{query.lower()}%"
+
+    return db.execute("""
+        SELECT *
+        FROM managed_bots
+        WHERE
+            LOWER(COALESCE(username, '')) LIKE ?
+            OR LOWER(COALESCE(first_name, '')) LIKE ?
+            OR CAST(telegram_id AS TEXT) LIKE ?
+        ORDER BY id DESC
+    """, (q, q, q)).fetchall()
+
+
+def db_set_admin(bot_id: int, admin_id: int):
+    db.execute("""
+        UPDATE managed_bots
+        SET admin_id = ?, updated_at = ?
+        WHERE id = ?
+    """, (
+        admin_id,
+        now(),
+        bot_id,
+    ))
+
+    db.commit()
+
+
+def db_set_enabled(bot_id: int, enabled: bool):
+    db.execute("""
+        UPDATE managed_bots
+        SET enabled = ?, updated_at = ?
+        WHERE id = ?
+    """, (
+        1 if enabled else 0,
+        now(),
+        bot_id,
+    ))
+
+    db.commit()
+
+
+# ============================================================
+# ACCESS CONTROL
+# ============================================================
+
+def is_master_admin(user_id: int) -> bool:
+    return (
+        MASTER_ADMIN_ID != 0
+        and user_id == MASTER_ADMIN_ID
+    )
+
+
+def is_bot_admin(user_id: int, bot_row) -> bool:
+    return (
+        bot_row is not None
+        and bot_row["admin_id"] is not None
+        and user_id == bot_row["admin_id"]
+    )
+
+
+# ============================================================
+# TELEGRAM API
+# ============================================================
+
+async def telegram_get_me(token: str):
+    """
+    Check whether token is valid and return bot information.
+    """
+
+    url = f"https://api.telegram.org/bot{token}/getMe"
+
+    timeout = ClientTimeout(total=15)
+
+    async with ClientSession(timeout=timeout) as session:
+        async with session.get(url) as response:
+
+            if response.status != 200:
+                return None, f"HTTP {response.status}"
+
+            data = await response.json()
+
+            if not data.get("ok"):
+                return None, data.get("description", "Telegram API error")
+
+            return data["result"], None
+
+
+async def telegram_get_webhook_info(token: str):
+    url = f"https://api.telegram.org/bot{token}/getWebhookInfo"
+
+    timeout = ClientTimeout(total=15)
+
+    async with ClientSession(timeout=timeout) as session:
+        async with session.get(url) as response:
+
+            if response.status != 200:
+                return None, f"HTTP {response.status}"
+
+            data = await response.json()
+
+            if not data.get("ok"):
+                return None, data.get("description", "Telegram API error")
+
+            return data["result"], None
+
+
+async def telegram_set_webhook(token: str, url: str, secret_token: str):
+    api_url = f"https://api.telegram.org/bot{token}/setWebhook"
+
+    payload = {
+        "url": url,
+        "secret_token": secret_token,
+        "drop_pending_updates": True,
+    }
+
+    timeout = ClientTimeout(total=20)
+
+    async with ClientSession(timeout=timeout) as session:
+        async with session.post(api_url, json=payload) as response:
+
+            data = await response.json()
+
+            if response.status != 200:
+                return False, data.get(
+                    "description",
+                    f"HTTP {response.status}"
+                )
+
+            return bool(data.get("ok")), data.get(
+                "description",
+                ""
+            )
+
+
+async def telegram_delete_webhook(token: str):
+    api_url = f"https://api.telegram.org/bot{token}/deleteWebhook"
+
+    timeout = ClientTimeout(total=20)
+
+    async with ClientSession(timeout=timeout) as session:
+        async with session.post(
+            api_url,
+            json={"drop_pending_updates": True}
+        ) as response:
+
+            data = await response.json()
+
+            if response.status != 200:
+                return False, data.get(
+                    "description",
+                    f"HTTP {response.status}"
+                )
+
+            return bool(data.get("ok")), data.get(
+                "description",
+                ""
+            )
+
+
+# ============================================================
+# MASTER BOT
+# ============================================================
+
+master_router = Router()
+
+
+def master_keyboard():
+    kb = InlineKeyboardBuilder()
+
+    kb.button(
+        text="➕ Add Bot",
+        callback_data="add_bot"
+    )
+
+    kb.button(
+        text="📋 Bot List",
+        callback_data="bot_list"
+    )
+
+    kb.button(
+        text="🔍 Search",
+        callback_data="search_bot"
+    )
+
+    kb.button(
+        text="🧪 System Test",
+        callback_data="system_test"
+    )
+
+    kb.adjust(2)
+
+    return kb.as_markup()
+
+
+def bot_keyboard(bot_id: int, enabled: bool):
+    kb = InlineKeyboardBuilder()
+
+    kb.button(
+        text="👤 Set Admin",
+        callback_data=f"setadmin:{bot_id}"
+    )
+
+    if enabled:
+        kb.button(
+            text="🔴 Disable",
+            callback_data=f"disable:{bot_id}"
+        )
+    else:
+        kb.button(
+            text="🟢 Enable",
+            callback_data=f"enable:{bot_id}"
+        )
+
+    kb.button(
+        text="🔗 Webhook",
+        callback_data=f"webhook:{bot_id}"
+    )
+
+    kb.button(
+        text="🧪 Test",
+        callback_data=f"testbot:{bot_id}"
+    )
+
+    kb.button(
+        text="🔙 Back",
+        callback_data="bot_list"
+    )
+
+    kb.adjust(2)
+
+    return kb.as_markup()
+
+
+def format_bot(bot_row):
+    username = (
+        f"@{html.escape(bot_row['username'])}"
+        if bot_row["username"]
+        else "—"
+    )
+
+    name = html.escape(
+        bot_row["first_name"] or "Unknown"
+    )
+
+    status = "🟢 Active" if bot_row["enabled"] else "🔴 Disabled"
+
+    admin = (
+        str(bot_row["admin_id"])
+        if bot_row["admin_id"]
+        else "❌ Not assigned"
+    )
+
+    return (
+        f"🤖 <b>{name}</b>\n"
+        f"👤 Username: {username}\n"
+        f"🆔 Bot ID: <code>{bot_row['telegram_id']}</code>\n"
+        f"👑 Bot Admin: <code>{admin}</code>\n"
+        f"📊 Status: {status}\n"
+        f"🗂 Internal ID: <code>{bot_row['id']}</code>"
+    )
+
+
+@master_router.message(CommandStart())
+async def start_handler(message: Message):
+
+    if not is_master_admin(message.from_user.id):
+        await message.answer(
+            "⛔ Access denied."
+        )
+        return
+
     await message.answer(
-        "Салом! Хуш омадед ба боти фурӯши ЮС. 🎮🔥\n"
-        "Аз тугмаҳои зерин истифода баред:",
-        reply_markup=builder.as_markup()
+        "👑 <b>MASTER BOT</b>\n\n"
+        "🤖 Multi-Bot Management System\n\n"
+        "Аз ин ҷо ту ҳамаи ботҳои худро идора карда метавонӣ.",
+        reply_markup=master_keyboard()
     )
 
-@dp.callback_query(F.data == "balance")
-async def show_balance(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    balance = user_balances.get(user_id, 0.0)
-    await callback.message.answer(f"💳 Баланси ҷории шумо: {balance} сомонӣ")
+
+@master_router.message(Command("panel"))
+async def panel_handler(message: Message):
+
+    if not is_master_admin(message.from_user.id):
+        return
+
+    await message.answer(
+        "👑 <b>MASTER PANEL</b>",
+        reply_markup=master_keyboard()
+    )
+
+
+# ============================================================
+# ADD BOT
+# ============================================================
+
+waiting_for_token = set()
+waiting_for_admin = {}
+
+
+@master_router.callback_query(F.data == "add_bot")
+async def add_bot_callback(callback: CallbackQuery):
+
+    if not is_master_admin(callback.from_user.id):
+        await callback.answer("Access denied", show_alert=True)
+        return
+
+    waiting_for_token.add(callback.from_user.id)
+
+    await callback.message.answer(
+        "➕ <b>Add Bot</b>\n\n"
+        "Token-и боти Telegram-ро фирист.\n\n"
+        "Мисол:\n"
+        "<code>123456:ABC...</code>\n\n"
+        "⚠️ Token-ро танҳо ба Master Bot фирист."
+    )
+
     await callback.answer()
 
-@dp.callback_query(F.data == "buy_uc")
-async def buy_uc_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Иلطфао PUBG ID-и худро фиристед то харид оғоз шавад:")
-    await state.set_state(BuyState.waiting_for_pubg_id)
-    await callback.answer()
 
-@dp.message(BuyState.waiting_for_pubg_id)
-async def process_pubg_id(message: types.Message, state: FSMContext):
-    pubg_id = message.text
+@master_router.message()
+async def text_router(message: Message):
+
+    if not is_master_admin(message.from_user.id):
+        return
+
     user_id = message.from_user.id
-    
-    # Масоили ҳисоб ва ҷудо кардани 2 сомонӣ фойда
-    # Ин ҷо нархи аслӣ ва фоида ҳисоб карда мешавад
-    base_price = 50.0  # Масалан нархи аслии UC
-    total_price = base_price + PROFIT_MARGIN # 52 сомонӣ бо ҳисоби 2 сомонӣ фойдаи соҳиби бот
-    
-    # Хабар додан ба соҳиби бот/фурӯшанда
-    await bot.send_message(
-        ADMIN_ID,
-        f"🚨 **Фармоиши нави UC!**\n"
-        f"👤 Харидор: @{message.from_user.username or message.from_user.first_name} (ID: {user_id})\n"
-        f"🎯 PUBG ID: `{pubg_id}`\n"
-        f"💵 Маблағи умумӣ: {total_price} сомонӣ (Аз ҷумла {PROFIT_MARGIN} с. фоида)"
-    )
-    
-    await message.answer(f"Фармоиши шумо қабул шуд! Нархи умумӣ: {total_price} сомонӣ (бо назардошти хизматрасонӣ). Ба زӯдӣ UC ба ID-и шумо интиқол дода мешавад.")
-    await state.clear()
+    text = (message.text or "").strip()
 
-@dp.callback_query(F.data == "withdraw")
-async def withdraw_start(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Маблағеро, ки мехоҳед вивест (баровард) кунед, нависед:")
-    await state.set_state(BuyState.waiting_for_withdrawal_amount)
+    # ----------------------------------------
+    # ADD BOT TOKEN
+    # ----------------------------------------
+
+    if user_id in waiting_for_token:
+
+        waiting_for_token.discard(user_id)
+
+        if not text:
+            await message.answer(
+                "❌ Token холӣ аст."
+            )
+            return
+
+        await message.answer(
+            "⏳ Token санҷида мешавад..."
+        )
+
+        bot_info, error = await telegram_get_me(text)
+
+        if error:
+            await message.answer(
+                "❌ <b>Token invalid</b>\n\n"
+                f"Telegram: <code>{html.escape(error)}</code>\n\n"
+                "Token-ро аз BotFather санҷ."
+            )
+            return
+
+        try:
+            bot_id = db_add_bot(
+                token=text,
+                telegram_id=bot_info["id"],
+                username=bot_info.get("username"),
+                first_name=bot_info.get("first_name"),
+            )
+
+        except sqlite3.IntegrityError:
+            await message.answer(
+                "⚠️ Ин бот аллакай ба система илова шудааст."
+            )
+            return
+
+        row = db_get_bot(bot_id)
+
+        await message.answer(
+            "✅ <b>Bot successfully added!</b>\n\n"
+            + format_bot(row),
+            reply_markup=bot_keyboard(
+                bot_id,
+                bool(row["enabled"])
+            )
+        )
+
+        return
+
+    # ----------------------------------------
+    # SET ADMIN
+    # ----------------------------------------
+
+    if user_id in waiting_for_admin:
+
+        bot_id = waiting_for_admin.pop(user_id)
+
+        try:
+            admin_id = int(text)
+        except ValueError:
+            await message.answer(
+                "❌ Admin ID бояд рақам бошад.\n"
+                "Мисол: <code>123456789</code>"
+            )
+            return
+
+        row = db_get_bot(bot_id)
+
+        if row is None:
+            await message.answer(
+                "❌ Bot ёфт нашуд."
+            )
+            return
+
+        db_set_admin(bot_id, admin_id)
+
+        row = db_get_bot(bot_id)
+
+        await message.answer(
+            "✅ <b>Bot Admin assigned.</b>\n\n"
+            + format_bot(row),
+            reply_markup=bot_keyboard(
+                bot_id,
+                bool(row["enabled"])
+            )
+        )
+
+        return
+
+
+# ============================================================
+# BOT LIST
+# ============================================================
+
+@master_router.callback_query(F.data == "bot_list")
+async def bot_list_callback(callback: CallbackQuery):
+
+    if not is_master_admin(callback.from_user.id):
+        await callback.answer("Access denied", show_alert=True)
+        return
+
+    bots = db_get_all_bots()
+
+    if not bots:
+        await callback.message.answer(
+            "📋 <b>Bot List</b>\n\n"
+            "Ҳоло ягон бот илова нашудааст."
+        )
+
+        await callback.answer()
+        return
+
+    kb = InlineKeyboardBuilder()
+
+    text = "📋 <b>MANAGED BOTS</b>\n\n"
+
+    for row in bots:
+
+        username = (
+            f"@{row['username']}"
+            if row["username"]
+            else str(row["telegram_id"])
+        )
+
+        status = "🟢" if row["enabled"] else "🔴"
+
+        text += (
+            f"{status} <b>{html.escape(username)}</b> "
+            f"— ID {row['id']}\n"
+        )
+
+        kb.button(
+            text=f"{status} {username}",
+            callback_data=f"bot:{row['id']}"
+        )
+
+    kb.button(
+        text="🔙 Main Menu",
+        callback_data="main_menu"
+    )
+
+    kb.adjust(1)
+
+    await callback.message.answer(
+        text,
+        reply_markup=kb.as_markup()
+    )
+
     await callback.answer()
+
+
+# ============================================================
+# BOT DETAILS
+# ============================================================
+
+@master_router.callback_query(F.data.startswith("bot:"))
+async def bot_details_callback(callback: CallbackQuery):
+
+    if not is_master_admin(callback.from_user.id):
+        await callback.answer("Access denied", show_alert=True)
+        return
+
+    bot_id = int(callback.data.split(":")[1])
+
+    row = db_get_bot(bot_id)
+
+    if row is None:
+        await callback.answer(
+            "Bot not found",
+            show_alert=True
+        )
+        return
+
+    await callback.message.answer(
+        format_bot(row),
+        reply_markup=bot_keyboard(
+            bot_id,
+            bool(row["enabled"])
+        )
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# SET ADMIN
+# ============================================================
+
+@master_router.callback_query(F.data.startswith("setadmin:"))
+async def set_admin_callback(callback: CallbackQuery):
+
+    if not is_master_admin(callback.from_user.id):
+        await callback.answer("Access denied", show_alert=True)
+        return
+
+    bot_id = int(callback.data.split(":")[1])
+
+    row = db_get_bot(bot_id)
+
+    if row is None:
+        await callback.answer(
+            "Bot not found",
+            show_alert=True
+        )
+        return
+
+    waiting_for_admin[callback.from_user.id] = bot_id
+
+    await callback.message.answer(
+        f"👤 <b>Set Admin</b>\n\n"
+        f"Bot: {html.escape(row['first_name'] or 'Unknown')}\n\n"
+        "Telegram ID-и соҳиби ин ботро фирист.\n\n"
+        "Мисол:\n"
+        "<code>123456789</code>"
+    )
+
+    await callback.answer()
+
+
+# ============================================================
+# ENABLE / DISABLE
+# ============================================================
+
+@master_router.callback_query(F.data.startswith("enable:"))
+async def enable_callback(callback: CallbackQuery):
+
+    if not is_master_admin(callback.from_user.id):
+        await callback.answer("Access denied", show_alert=True)
+        return
+
+    bot_id = int(callback.data.split(":")[1])
+
+    db_set_enabled(bot_id, True)
+
+    row = db_get_bot(bot_id)
+
+    await callback.message.answer(
+        "🟢 <b>Bot enabled</b>\n\n"
+        + format_bot(row),
+        reply_markup=bot_keyboard(bot_id, True)
+    )
+
+    await callback.answer("Enabled")
+
+
+@master_router.callback_query(F.data.startswith("disable:"))
+async def disable_callback(callback: CallbackQuery):
+
+    if not is_master_admin(callback.from_user.id):
+        await callback.answer("Access denied", show_alert=True)
+        return
+
+    bot_id = int(callback.data.split(":")[1])
+
+    db_set_enabled(bot_id, False)
+
+    row = db_get_bot(bot_id)
+
+    await callback.message.answer(
+        "🔴 <b>Bot disabled</b>\n\n"
+        + format_bot(row),
+        reply_markup=bot_keyboard(bot_id, False)
+    )
+
+    await callback.answer("Disabled")
+
+
+# ============================================================
+# WEBHOOK
+# ============================================================
+
+@master_router.callback_query(F.data.startswith("webhook:"))
+async def webhook_callback(callback: CallbackQuery):
+
+    if not is_master_admin(callback.from_user.id):
+        await callback.answer("Access denied", show_alert=True)
+        return
+
+    bot_id = int(callback.data.split(":")[1])
+
+    row = db_get_bot(bot_id)
+
+    if row is None:
+        await callback.answer(
+            "Bot not found",
+            show_alert=True
+        )
+        return
+
+    info, error = await telegram_get_webhook_info(
+        row["token"]
+    )
+
+    if error:
+        await callback.message.answer(
+            "❌ Webhook check failed:\n"
+            f"<code>{html.escape(error)}</code>"
+        )
+
+        await callback.answer()
+        return
+
+    webhook_url = info.get("url") or "Not configured"
+
+    pending = info.get("pending_update_count", 0)
+
+    last_error = info.get("last_error_message")
+
+    text = (
+        "🔗 <b>WEBHOOK INFO</b>\n\n"
+        f"URL:\n<code>{html.escape(webhook_url)}</code>\n\n"
+        f"Pending updates: <code>{pending}</code>\n"
+    )
+
+    if last_error:
+        text += (
+            "\n⚠️ Last error:\n"
+            f"<code>{html.escape(last_error)}</code>"
+        )
+
+    if BASE_URL:
+        expected_url = (
+            f"{BASE_URL}"
+            f"{WEBHOOK_PATH_PREFIX}"
+            f"/{bot_id}/"
+            f"{row['webhook_secret']}"
+        )
+
+        text += (
+            "\n\nExpected URL:\n"
+            f"<code>{html.escape(expected_url)}</code>"
+        )
+
+    await callback.message.answer(text)
+
+    await callback.answer()
+
+
+# ============================================================
+# TEST BOT
+# ============================================================
+
+@master_router.callback_query(F.data.startswith("testbot:"))
+async def test_bot_callback(callback: CallbackQuery):
+
+    if not is_master_admin(callback.from_user.id):
+        await callback.answer("Access denied", show_alert=True)
+        return
+
+    bot_id = int(callback.data.split(":")[1])
+
+    row = db_get_bot(bot_id)
+
+    if row is None:
+        await callback.answer(
+            "Bot not found",
+            show_alert=True
+        )
+        return
+
+    await callback.message.answer(
+        "🧪 <b>Testing bot...</b>"
+    )
+
+    bot_info, error = await telegram_get_me(
+        row["token"]
+    )
+
+    if error:
+        await callback.message.answer(
+            "❌ Bot test failed:\n"
+            f"<code>{html.escape(error)}</code>"
+        )
+        await callback.answer()
+        return
+
+    webhook_info, webhook_error = (
+        await telegram_get_
 
 @dp.message(BuyState.waiting_for_withdrawal_amount)
 async def process_withdrawal(message: types.Message, state: FSMContext):
