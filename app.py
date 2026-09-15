@@ -10,7 +10,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN ="8636114621:AAErp00GYBoMPIpsjvReJ8JBnSl4td2haM"
+TOKEN ="8724923696:AAH11sbD8L1oK6q45-PFtSxfplCHsgMNJLU"
 ADMIN_ID ="123456789" # ID-и соҳиби бот ё фурӯшанда
 PROFIT_MARGIN = 2.0 # 2 сомонӣ фойда барои соҳиби бот
 
