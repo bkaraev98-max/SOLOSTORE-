@@ -1,15 +1,12 @@
 import asyncio
-import html
 import logging
 import os
 import sqlite3
 from contextlib import suppress
-from datetime import datetime
 
 from aiohttp import web
-
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -17,484 +14,212 @@ from aiogram.types import (
     Message,
 )
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
 
-# ============================================================
-# CONFIG
-# ============================================================
-
-MASTER_BOT_TOKEN = os.getenv("MASTER_BOT_TOKEN", "").strip()
-
-try:
-    MASTER_ADMIN_ID = int(os.getenv("ADMIN_ID", "0").strip())
-except ValueError:
-    MASTER_ADMIN_ID = 0
-
+TOKEN = os.getenv("MASTER_BOT_TOKEN", "").strip()
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PORT = int(os.getenv("PORT", "10000"))
-DB_FILE = os.getenv("DB_FILE", "database.db")
+DB = "database.db"
 
+conn = sqlite3.connect(DB, check_same_thread=False)
+conn.row_factory = sqlite3.Row
 
-# ============================================================
-# LOGGING
-# ============================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+conn.execute("""
+CREATE TABLE IF NOT EXISTS bots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token TEXT NOT NULL UNIQUE,
+    telegram_id INTEGER NOT NULL UNIQUE,
+    username TEXT,
+    name TEXT,
+    owner_id INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 1
 )
+""")
+conn.commit()
 
-logger = logging.getLogger(__name__)
+router = Router()
 
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-db = sqlite3.connect(
-    DB_FILE,
-    check_same_thread=False,
-)
-
-db.row_factory = sqlite3.Row
-
-db.execute(
-    """
-    CREATE TABLE IF NOT EXISTS bots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        token TEXT NOT NULL UNIQUE,
-        telegram_id INTEGER NOT NULL UNIQUE,
-        username TEXT,
-        first_name TEXT,
-        admin_id INTEGER,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )
-    """
-)
-
-db.commit()
+waiting_token = set()
+waiting_owner = {}
+tasks = {}
 
 
-def now():
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+def master(uid):
+    return uid == ADMIN_ID
 
 
-def db_add_bot(
-    token,
-    telegram_id,
-    username,
-    first_name,
-):
-    timestamp = now()
-
-    cursor = db.execute(
-        """
-        INSERT INTO bots (
-            token,
-            telegram_id,
-            username,
-            first_name,
-            admin_id,
-            enabled,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?, ?, NULL, 1, ?, ?)
-        """,
-        (
-            token,
-            telegram_id,
-            username,
-            first_name,
-            timestamp,
-            timestamp,
-        ),
-    )
-
-    db.commit()
-
-    return cursor.lastrowid
-
-
-def db_get_bot(bot_id):
-    return db.execute(
+def get_bot(bot_id):
+    return conn.execute(
         "SELECT * FROM bots WHERE id = ?",
         (bot_id,),
     ).fetchone()
 
 
-def db_get_all_bots():
-    return db.execute(
-        "SELECT * FROM bots ORDER BY id DESC"
-    ).fetchall()
-
-
-def db_search_bots(query):
-    q = f"%{query.lower()}%"
-
-    return db.execute(
-        """
-        SELECT *
-        FROM bots
-        WHERE
-            LOWER(COALESCE(username, '')) LIKE ?
-            OR LOWER(COALESCE(first_name, '')) LIKE ?
-            OR CAST(telegram_id AS TEXT) LIKE ?
-        ORDER BY id DESC
-        """,
-        (q, q, q),
-    ).fetchall()
-
-
-def db_set_admin(bot_id, admin_id):
-    db.execute(
-        """
-        UPDATE bots
-        SET admin_id = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (
-            admin_id,
-            now(),
-            bot_id,
-        ),
-    )
-
-    db.commit()
-
-
-def db_set_enabled(bot_id, enabled):
-    db.execute(
-        """
-        UPDATE bots
-        SET enabled = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (
-            1 if enabled else 0,
-            now(),
-            bot_id,
-        ),
-    )
-
-    db.commit()
-
-
-# ============================================================
-# ACCESS
-# ============================================================
-
-def is_master(user_id):
-    return (
-        MASTER_ADMIN_ID != 0
-        and user_id == MASTER_ADMIN_ID
-    )
-
-
-def is_bot_admin(user_id, bot_id):
-    row = db_get_bot(bot_id)
-
-    if row is None:
-        return False
-
-    return (
-        row["admin_id"] is not None
-        and int(row["admin_id"]) == int(user_id)
-    )
-
-
-# ============================================================
-# TELEGRAM TOKEN CHECK
-# ============================================================
-
-async def check_token(token):
-    bot = None
+async def get_me(token):
+    bot = Bot(token)
 
     try:
-        bot = Bot(token=token)
-
-        info = await bot.get_me()
-
-        return info, None
-
+        return await bot.get_me(), None
     except Exception as e:
         return None, str(e)
-
     finally:
-        if bot is not None:
-            with suppress(Exception):
-                await bot.session.close()
+        await bot.session.close()
 
 
-# ============================================================
-# STATE
-# ============================================================
-
-waiting_for_token = set()
-waiting_for_admin = {}
-waiting_for_search = set()
-
-
-# ============================================================
-# MANAGED BOT TASKS
-# ============================================================
-
-managed_tasks = {}
-
-
-# ============================================================
-# MASTER BOT KEYBOARDS
-# ============================================================
-
-def main_keyboard():
+def menu():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="➕ Add Bot",
-                    callback_data="add_bot",
-                ),
+                    callback_data="add",
+                )
+            ],
+            [
                 InlineKeyboardButton(
                     text="🤖 Bot List",
-                    callback_data="bot_list",
-                ),
+                    callback_data="list",
+                )
             ],
             [
-                InlineKeyboardButton(
-                    text="🔎 Search",
-                    callback_data="search",
-                ),
                 InlineKeyboardButton(
                     text="🧪 System Test",
-                    callback_data="system_test",
-                ),
+                    callback_data="sys",
+                )
             ],
         ]
     )
 
 
-def bot_keyboard(bot_id, enabled):
-    buttons = [
-        [
-            InlineKeyboardButton(
-                text="👤 Set Owner",
-                callback_data=f"owner:{bot_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="🧪 Test",
-                callback_data=f"test:{bot_id}",
-            )
-        ],
-    ]
-
-    if enabled:
-        buttons.append(
+def bot_menu(bot_id, enabled):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🔴 Disable",
-                    callback_data=f"disable:{bot_id}",
+                    text="👤 Set Owner",
+                    callback_data=f"owner:{bot_id}",
                 )
-            ]
-        )
-    else:
-        buttons.append(
+            ],
             [
                 InlineKeyboardButton(
-                    text="🟢 Enable",
-                    callback_data=f"enable:{bot_id}",
+                    text="🧪 Test",
+                    callback_data=f"test:{bot_id}",
                 )
-            ]
-        )
-
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Back",
-                callback_data="bot_list",
-            )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔴 Disable" if enabled else "🟢 Enable",
+                    callback_data=(
+                        f"disable:{bot_id}"
+                        if enabled
+                        else f"enable:{bot_id}"
+                    ),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Back",
+                    callback_data="list",
+                )
+            ],
         ]
     )
 
-    return InlineKeyboardMarkup(
-        inline_keyboard=buttons
-    )
 
-
-# ============================================================
-# MASTER ROUTER
-# ============================================================
-
-master_router = Router()
-
-
-# ============================================================
-# MASTER /start
-# ============================================================
-
-@master_router.message(CommandStart())
-async def master_start(message: Message):
-
-    if not is_master(message.from_user.id):
-        await message.answer(
-            "⛔ Access denied."
-        )
+@router.message(CommandStart())
+async def start(message: Message):
+    if not master(message.from_user.id):
+        await message.answer("⛔ Access denied.")
         return
 
     await message.answer(
-        "👑 <b>MASTER CONTROL PANEL</b>\n\n"
-        "Системаи идоракунии ботҳо фаъол аст.",
-        reply_markup=main_keyboard(),
+        "👑 Master Control Panel",
+        reply_markup=menu(),
     )
 
 
-# ============================================================
-# MASTER /panel
-# ============================================================
-
-@master_router.message(Command("panel"))
-async def master_panel(message: Message):
-
-    if not is_master(message.from_user.id):
-        await message.answer(
-            "⛔ Access denied."
-        )
-        return
-
-    await message.answer(
-        "👑 <b>MASTER CONTROL PANEL</b>",
-        reply_markup=main_keyboard(),
-    )
-
-
-# ============================================================
-# ADD BOT
-# ============================================================
-
-@master_router.callback_query(
-    F.data == "add_bot"
-)
-async def add_bot_callback(callback: CallbackQuery):
-
-    if not is_master(callback.from_user.id):
+@router.callback_query(F.data == "add")
+async def add(callback: CallbackQuery):
+    if not master(callback.from_user.id):
         await callback.answer(
             "Access denied",
             show_alert=True,
         )
         return
 
-    waiting_for_token.add(
-        callback.from_user.id
-    )
+    waiting_token.add(callback.from_user.id)
 
     await callback.message.answer(
-        "➕ <b>ADD BOT</b>\n\n"
-        "Token-и боти Telegram-ро фиристед.\n\n"
-        "Мисол:\n"
-        "<code>123456789:AA...</code>"
+        "➕ Token-и BotFather-ро фиристед."
     )
 
     await callback.answer()
 
 
-# ============================================================
-# BOT LIST
-# ============================================================
-
-@master_router.callback_query(
-    F.data == "bot_list"
-)
-async def bot_list_callback(callback: CallbackQuery):
-
-    if not is_master(callback.from_user.id):
+@router.callback_query(F.data == "list")
+async def listing(callback: CallbackQuery):
+    if not master(callback.from_user.id):
         await callback.answer(
             "Access denied",
             show_alert=True,
         )
         return
 
-    rows = db_get_all_bots()
+    rows = conn.execute(
+        "SELECT * FROM bots ORDER BY id DESC"
+    ).fetchall()
 
     if not rows:
         await callback.message.answer(
-            "🤖 <b>Bot List</b>\n\n"
-            "Ҳоло ягон бот илова нашудааст.",
-            reply_markup=main_keyboard(),
+            "🤖 Ягон bot илова нашудааст.",
+            reply_markup=menu(),
         )
+    else:
+        buttons = []
 
-        await callback.answer()
-        return
+        for row in rows:
+            if row["username"]:
+                name = f"@{row['username']}"
+            else:
+                name = row["name"] or f"Bot {row['id']}"
 
-    buttons = []
+            status = "🟢" if row["enabled"] else "🔴"
 
-    for row in rows:
-
-        username = row["username"]
-
-        if username:
-            title = f"@{username}"
-        else:
-            title = row["first_name"] or f"Bot #{row['id']}"
-
-        status = "🟢" if row["enabled"] else "🔴"
-
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{status} {title}",
-                    callback_data=f"bot:{row['id']}",
-                )
-            ]
-        )
-
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Main Menu",
-                callback_data="main_menu",
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{status} {name}",
+                        callback_data=f"bot:{row['id']}",
+                    )
+                ]
             )
-        ]
-    )
 
-    await callback.message.answer(
-        "🤖 <b>MANAGED BOTS</b>\n\n"
-        f"Total: <b>{len(rows)}</b>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=buttons
-        ),
-    )
+        await callback.message.answer(
+            "🤖 Managed Bots",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=buttons
+            ),
+        )
 
     await callback.answer()
 
 
-# ============================================================
-# BOT DETAILS
-# ============================================================
-
-@master_router.callback_query(
-    F.data.startswith("bot:")
-)
-async def bot_details_callback(
-    callback: CallbackQuery,
-):
-
-    if not is_master(callback.from_user.id):
+@router.callback_query(F.data.startswith("bot:"))
+async def details(callback: CallbackQuery):
+    if not master(callback.from_user.id):
         await callback.answer(
             "Access denied",
             show_alert=True,
         )
         return
 
-    bot_id = int(
-        callback.data.split(":")[1]
-    )
-
-    row = db_get_bot(bot_id)
+    bot_id = int(callback.data.split(":")[1])
+    row = get_bot(bot_id)
 
     if row is None:
         await callback.answer(
-            "Bot not found",
+            "Not found",
             show_alert=True,
         )
         return
@@ -506,32 +231,26 @@ async def bot_details_callback(
     )
 
     owner = (
-        str(row["admin_id"])
-        if row["admin_id"]
+        str(row["owner_id"])
+        if row["owner_id"]
         else "Not assigned"
-    )
-
-    status = (
-        "🟢 Enabled"
-        if row["enabled"]
-        else "🔴 Disabled"
     )
 
     text = (
         "🤖 <b>BOT DETAILS</b>\n\n"
-        f"🆔 Internal ID: <code>{row['id']}</code>\n"
-        f"📛 Name: <b>{html.escape(row['first_name'] or '—')}</b>\n"
-        f"👤 Username: <b>{html.escape(username)}</b>\n"
-        f"🆔 Telegram ID: <code>{row['telegram_id']}</code>\n"
-        f"👑 Owner ID: <code>{html.escape(owner)}</code>\n"
-        f"📡 Status: {status}\n"
-        f"📅 Created: <code>{row['created_at']}</code>\n\n"
-        "🔐 Token: <b>Hidden</b>"
+        f"ID: <code>{row['id']}</code>\n"
+        f"Name: <b>{row['name'] or '—'}</b>\n"
+        f"Username: <b>{username}</b>\n"
+        f"Telegram ID: <code>{row['telegram_id']}</code>\n"
+        f"Owner: <code>{owner}</code>\n"
+        f"Status: "
+        f"{'🟢 Enabled' if row['enabled'] else '🔴 Disabled'}\n"
+        "Token: 🔐 Hidden"
     )
 
     await callback.message.answer(
         text,
-        reply_markup=bot_keyboard(
+        reply_markup=bot_menu(
             bot_id,
             bool(row["enabled"]),
         ),
@@ -540,379 +259,469 @@ async def bot_details_callback(
     await callback.answer()
 
 
-# ============================================================
-# SET OWNER
-# ============================================================
-
-@master_router.callback_query(
-    F.data.startswith("owner:")
-)
-async def owner_callback(
-    callback: CallbackQuery,
-):
-
-    if not is_master(callback.from_user.id):
+@router.callback_query(F.data.startswith("owner:"))
+async def owner(callback: CallbackQuery):
+    if not master(callback.from_user.id):
         await callback.answer(
             "Access denied",
             show_alert=True,
         )
         return
 
-    bot_id = int(
-        callback.data.split(":")[1]
-    )
+    bot_id = int(callback.data.split(":")[1])
 
-    row = db_get_bot(bot_id)
-
-    if row is None:
+    if get_bot(bot_id) is None:
         await callback.answer(
-            "Bot not found",
+            "Not found",
             show_alert=True,
         )
         return
 
-    waiting_for_admin[
-        callback.from_user.id
-    ] = bot_id
+    waiting_owner[callback.from_user.id] = bot_id
 
     await callback.message.answer(
-        "👤 <b>SET BOT OWNER</b>\n\n"
-        "Owner/Admin-и ин ботро бо Telegram ID фиристед.\n\n"
-        "Мисол:\n"
-        "<code>123456789</code>"
+        "👤 Telegram ID-и Owner-ро фиристед."
     )
 
     await callback.answer()
 
 
-# ============================================================
-# ENABLE
-# ============================================================
-
-@master_router.callback_query(
-    F.data.startswith("enable:")
-)
-async def enable_callback(
-    callback: CallbackQuery,
-):
-
-    if not is_master(callback.from_user.id):
+@router.callback_query(F.data.startswith("enable:"))
+async def enable(callback: CallbackQuery):
+    if not master(callback.from_user.id):
         await callback.answer(
             "Access denied",
             show_alert=True,
         )
         return
 
-    bot_id = int(
-        callback.data.split(":")[1]
-    )
-
-    row = db_get_bot(bot_id)
+    bot_id = int(callback.data.split(":")[1])
+    row = get_bot(bot_id)
 
     if row is None:
         await callback.answer(
-            "Bot not found",
+            "Not found",
             show_alert=True,
         )
         return
 
-    db_set_enabled(bot_id, True)
+    conn.execute(
+        "UPDATE bots SET enabled = 1 WHERE id = ?",
+        (bot_id,),
+    )
+    conn.commit()
 
-    if bot_id not in managed_tasks:
-        await start_managed_bot(bot_id)
+    await start_managed(bot_id)
 
     await callback.message.answer(
-        "🟢 <b>Bot enabled.</b>"
+        "🟢 Bot enabled."
     )
 
-    await callback.answer(
-        "Enabled"
-    )
+    await callback.answer()
 
 
-# ============================================================
-# DISABLE
-# ============================================================
-
-@master_router.callback_query(
-    F.data.startswith("disable:")
-)
-async def disable_callback(
-    callback: CallbackQuery,
-):
-
-    if not is_master(callback.from_user.id):
+@router.callback_query(F.data.startswith("disable:"))
+async def disable(callback: CallbackQuery):
+    if not master(callback.from_user.id):
         await callback.answer(
             "Access denied",
             show_alert=True,
         )
         return
 
-    bot_id = int(
-        callback.data.split(":")[1]
-    )
-
-    row = db_get_bot(bot_id)
+    bot_id = int(callback.data.split(":")[1])
+    row = get_bot(bot_id)
 
     if row is None:
         await callback.answer(
-            "Bot not found",
+            "Not found",
             show_alert=True,
         )
         return
 
-    db_set_enabled(bot_id, False)
+    conn.execute(
+        "UPDATE bots SET enabled = 0 WHERE id = ?",
+        (bot_id,),
+    )
+    conn.commit()
 
-    await stop_managed_bot(bot_id)
+    await stop_managed(bot_id)
 
     await callback.message.answer(
-        "🔴 <b>Bot disabled.</b>"
+        "🔴 Bot disabled."
     )
 
-    await callback.answer(
-        "Disabled"
-    )
+    await callback.answer()
 
 
-# ============================================================
-# TEST BOT
-# ============================================================
-
-@master_router.callback_query(
-    F.data.startswith("test:")
-)
-async def test_callback(
-    callback: CallbackQuery,
-):
-
-    if not is_master(callback.from_user.id):
+@router.callback_query(F.data.startswith("test:"))
+async def test(callback: CallbackQuery):
+    if not master(callback.from_user.id):
         await callback.answer(
             "Access denied",
             show_alert=True,
         )
         return
 
-    bot_id = int(
-        callback.data.split(":")[1]
-    )
-
-    row = db_get_bot(bot_id)
+    bot_id = int(callback.data.split(":")[1])
+    row = get_bot(bot_id)
 
     if row is None:
         await callback.answer(
-            "Bot not found",
+            "Not found",
             show_alert=True,
         )
         return
 
-    await callback.message.answer(
-        "🧪 <b>TESTING...</b>"
-    )
-
-    info, error = await check_token(
-        row["token"]
-    )
+    info, error = await get_me(row["token"])
 
     if error:
+        await callback.message.answer(
+            "❌ Test failed:\n"
+            f"<code>{error}</code>"
+        )
+    else:
+        running = (
+            bot_id in tasks
+            and not tasks[bot_id].done()
+        )
 
         await callback.message.answer(
-            "❌ <b>TEST FAILED</b>\n\n"
-            f"<code>{html.escape(error)}</code>"
+            "✅ <b>TEST PASSED</b>\n\n"
+            f"Name: <b>{info.first_name or '—'}</b>\n"
+            f"Username: <b>@{info.username or '—'}</b>\n"
+            f"Telegram ID: <code>{info.id}</code>\n"
+            f"Polling: "
+            f"{'🟢 Running' if running else '🔴 Stopped'}"
         )
-
-        await callback.answer()
-        return
-
-    running = (
-        bot_id in managed_tasks
-        and not managed_tasks[bot_id].done()
-    )
-
-    username = (
-        f"@{info.username}"
-        if info.username
-        else "—"
-    )
-
-    await callback.message.answer(
-        "✅ <b>BOT TEST PASSED</b>\n\n"
-        f"🤖 Name: <b>{html.escape(info.first_name or '—')}</b>\n"
-        f"👤 Username: <b>{html.escape(username)}</b>\n"
-        f"🆔 Telegram ID: <code>{info.id}</code>\n"
-        f"🗄 Database: ✅\n"
-        f"🔑 Token: ✅ Valid\n"
-        f"🔄 Polling: "
-        f"{'🟢 Running' if running else '🔴 Stopped'}"
-    )
-
-    await callback.answer(
-        "Test passed"
-    )
-
-
-# ============================================================
-# SEARCH
-# ============================================================
-
-@master_router.callback_query(
-    F.data == "search"
-)
-async def search_callback(
-    callback: CallbackQuery,
-):
-
-    if not is_master(callback.from_user.id):
-        await callback.answer(
-            "Access denied",
-            show_alert=True,
-        )
-        return
-
-    waiting_for_search.add(
-        callback.from_user.id
-    )
-
-    await callback.message.answer(
-        "🔎 <b>SEARCH BOT</b>\n\n"
-        "Username, name ё Telegram ID-ро фиристед."
-    )
 
     await callback.answer()
 
 
-# ============================================================
-# SYSTEM TEST
-# ============================================================
-
-@master_router.callback_query(
-    F.data == "system_test"
-)
-async def system_test_callback(
-    callback: CallbackQuery,
-):
-
-    if not is_master(callback.from_user.id):
+@router.callback_query(F.data == "sys")
+async def system(callback: CallbackQuery):
+    if not master(callback.from_user.id):
         await callback.answer(
             "Access denied",
             show_alert=True,
         )
         return
 
-    rows = db_get_all_bots()
+    total = conn.execute(
+        "SELECT COUNT(*) FROM bots"
+    ).fetchone()[0]
 
     running = sum(
-        1
-        for bot_id, task in managed_tasks.items()
-        if not task.done()
-    )
-
-    enabled = sum(
-        1
-        for row in rows
-        if row["enabled"]
+        not task.done()
+        for task in tasks.values()
     )
 
     await callback.message.answer(
         "🧪 <b>SYSTEM TEST</b>\n\n"
-        "🗄 Database: ✅ Online\n"
-        "🤖 Master Bot: ✅ Online\n"
-        f"📦 Saved Bots: <b>{len(rows)}</b>\n"
-        f"🟢 Enabled Bots: <b>{enabled}</b>\n"
-        f"🔄 Running Polling: <b>{running}</b>\n"
-        "🌐 Web Server: ✅ Online"
-    )
-
-    await callback.answer(
-        "System OK"
-    )
-
-
-# ============================================================
-# MAIN MENU
-# ============================================================
-
-@master_router.callback_query(
-    F.data == "main_menu"
-)
-async def main_menu_callback(
-    callback: CallbackQuery,
-):
-
-    if not is_master(callback.from_user.id):
-        await callback.answer(
-            "Access denied",
-            show_alert=True,
-        )
-        return
-
-    await callback.message.answer(
-        "👑 <b>MASTER CONTROL PANEL</b>",
-        reply_markup=main_keyboard(),
+        "Database: ✅\n"
+        "Master Bot: ✅\n"
+        f"Saved bots: <b>{total}</b>\n"
+        f"Running bots: <b>{running}</b>"
     )
 
     await callback.answer()
 
 
-# ============================================================
-# MASTER TEXT HANDLER
-# ============================================================
-
-@master_router.message()
-async def master_text_handler(
-    message: Message,
-):
-
+@router.message()
+async def text(message: Message):
     user_id = message.from_user.id
 
-    if not is_master(user_id):
+    if not master(user_id):
         await message.answer(
             "⛔ Access denied."
         )
         return
 
-    text = (message.text or "").strip()
+    value = (message.text or "").strip()
 
-    # --------------------------------------------------------
-    # TOKEN
-    # --------------------------------------------------------
+    if user_id in waiting_token:
+        waiting_token.remove(user_id)
 
-    if user_id in waiting_for_token:
-
-        waiting_for_token.discard(user_id)
-
-        await message.answer(
-            "🔎 <b>Checking Telegram token...</b>"
-        )
-
-        info, error = await check_token(text)
+        info, error = await get_me(value)
 
         if error:
-
             await message.answer(
-                "❌ <b>Invalid Bot Token</b>\n\n"
-                f"<code>{html.escape(error)}</code>\n\n"
-                "Token-ро аз BotFather санҷед."
+                "❌ Invalid token:\n"
+                f"<code>{error}</code>"
             )
             return
 
         try:
-
-            bot_id = db_add_bot(
-                token=text,
-                telegram_id=info.id,
-                username=info.username,
-                first_name=info.first_name,
+            cursor = conn.execute(
+                """
+                INSERT INTO bots (
+                    token,
+                    telegram_id,
+                    username,
+                    name
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    value,
+                    info.id,
+                    info.username,
+                    info.first_name,
+                ),
             )
 
-        except sqlite3.IntegrityError:
+            conn.commit()
 
+        except sqlite3.IntegrityError:
             await message.answer(
-                "⚠️ Ин бот аллакай дар система мавҷуд аст."
+                "⚠️ Ин bot аллакай илова шудааст."
             )
             return
 
+        bot_id = cursor.lastrowid
+
         await message.answer(
-            "✅ <b>BOT ADDED SUCCESSFULLY</b>\n\n"
-            f"📛 Name: <b>{html.escape(info.first_name or '—')}</b>\n"
-            f"👤 Username: "
-        
+            "✅ <b>BOT ADDED</b>\n\n"
+            f"Name: <b>{info.first_name or '—'}</b>\n"
+            f"Username: <b>@{info.username or '—'}</b>\n"
+            f"Telegram ID: <code>{info.id}</code>\n"
+            f"Internal ID: <code>{bot_id}</code>"
+        )
+
+        await start_managed(bot_id)
+        return
+
+    if user_id in waiting_owner:
+        bot_id = waiting_owner.pop(user_id)
+
+        try:
+            owner_id = int(value)
+        except ValueError:
+            await message.answer(
+                "❌ ID бояд рақам бошад."
+            )
+            return
+
+        conn.execute(
+            """
+            UPDATE bots
+            SET owner_id = ?
+            WHERE id = ?
+            """,
+            (
+                owner_id,
+                bot_id,
+            ),
+        )
+
+        conn.commit()
+
+        await message.answer(
+            "✅ Owner assigned."
+        )
+        return
+
+    await message.answer(
+        "👑 Master Panel",
+        reply_markup=menu(),
+    )
+
+
+def managed_router(bot_id):
+    managed = Router()
+
+    @managed.message(CommandStart())
+    async def managed_start(message: Message):
+        row = get_bot(bot_id)
+
+        if row is None:
+            return
+
+        if not row["enabled"]:
+            await message.answer(
+                "🔴 Bot disabled."
+            )
+            return
+
+        if (
+            row["owner_id"]
+            and message.from_user.id == row["owner_id"]
+        ):
+            await message.answer(
+                "👑 <b>Owner Panel</b>\n\n"
+                "Шумо Owner-и ҳамин bot ҳастед."
+            )
+        else:
+            await message.answer(
+                "🤖 Bot is online."
+            )
+
+    return managed
+
+
+async def worker(bot_id):
+    row = get_bot(bot_id)
+
+    if row is None:
+        return
+
+    bot = Bot(row["token"])
+
+    try:
+        await bot.get_me()
+
+        await bot.delete_webhook(
+            drop_pending_updates=True
+        )
+
+        dispatcher = Dispatcher()
+        dispatcher.include_router(
+            managed_router(bot_id)
+        )
+
+        await dispatcher.start_polling(
+            bot,
+            handle_signals=False,
+        )
+
+    except asyncio.CancelledError:
+        raise
+
+    except Exception:
+        log.exception(
+            "Managed bot %s stopped because of an error",
+            bot_id,
+        )
+
+    finally:
+        await bot.session.close()
+
+
+async def start_managed(bot_id):
+    task = tasks.get(bot_id)
+
+    if task and not task.done():
+        return
+
+    tasks[bot_id] = asyncio.create_task(
+        worker(bot_id)
+    )
+
+
+async def stop_managed(bot_id):
+    task = tasks.get(bot_id)
+
+    if task:
+        task.cancel()
+
+        with suppress(
+            asyncio.CancelledError,
+            Exception,
+        ):
+            await task
+
+        tasks.pop(
+            bot_id,
+            None,
+        )
+
+
+async def health(request):
+    total = conn.execute(
+        "SELECT COUNT(*) FROM bots"
+    ).fetchone()[0]
+
+    running = sum(
+        not task.done()
+        for task in tasks.values()
+    )
+
+    return web.json_response(
+        {
+            "ok": True,
+            "saved_bots": total,
+            "running_bots": running,
+        }
+    )
+
+
+async def main():
+    if not TOKEN:
+        raise RuntimeError(
+            "MASTER_BOT_TOKEN is missing"
+        )
+
+    if ADMIN_ID == 0:
+        raise RuntimeError(
+            "ADMIN_ID is missing"
+        )
+
+    master_bot = Bot(TOKEN)
+
+    info = await master_bot.get_me()
+
+    log.info(
+        "Master Bot: @%s (%s)",
+        info.username,
+        info.id,
+    )
+
+    app = web.Application()
+
+    app.router.add_get(
+        "/",
+        health,
+    )
+
+    app.router.add_get(
+        "/health",
+        health,
+    )
+
+    runner = web.AppRunner(app)
+
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        PORT,
+    )
+
+    await site.start()
+
+    rows = conn.execute(
+        "SELECT id FROM bots WHERE enabled = 1"
+    ).fetchall()
+
+    for row in rows:
+        await start_managed(
+            row["id"]
+        )
+
+    dispatcher = Dispatcher()
+
+    dispatcher.include_router(
+        router
+    )
+
+    try:
+        await master_bot.delete_webhook(
+            drop_pending_updates=True
+        )
+
+        await dispatcher.start_polling(
+            master_bot,
+            handle_signals=False,
+        )
+
+    finally:
+        for bot_id in list(tasks):
+            await stop_managed(bot_id)
+
+        await runner.cleanup()
+        await master_bot.session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
