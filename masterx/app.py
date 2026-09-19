@@ -8,7 +8,7 @@ from telebot import types
 # ==========================================
 # 👑 MASTER X AUTO-APPROVE VENDOR BOT
 # ==========================================
-TOKEN = os.getenv("TOKEN", "8953447600:AAE5WupEUGhW4jkW59jJi2DaVYZLLrO6fQc")
+TOKEN = os.getenv("TOKEN", "YOUR_BOT_TOKEN")
 ADMIN_USERNAME = (
     "админсайт"  # Номи аккаунти ту (бе аломати @ ё бо @ фарқ надорад)
 )
