@@ -600,28 +600,38 @@ class Database:
 
         now = current_time()
 
-        
-                with self.connection() as conn:
-cursor = conn.execute("""
-INSERT INTO subscriptions (
-user_id, plan_name, plan_version,
-status, timer_mode, starts_at, expires_at,
-remaining_seconds, is_started,
-created_at, updated_at
-)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-""", (
-user_id,
+        with self.connection() as conn:
+            cursor = conn.execute("""
+                INSERT INTO subscriptions (
+                    user_id,
+                    plan_name,
+                    plan_version,
+                    status,
+                    timer_mode,
+                    starts_at,
+                    expires_at,
+                    remaining_seconds,
+                    is_started,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
                 plan_name,
                 plan_version,
                 status,
                 timer_mode,
                 starts_at,
                 expires_at,
-                int(remaining_seconds or 0),
+                max(0, int(remaining_seconds)),
                 int(bool(is_started)),
                 now,
-                now
+                now,
             ))
 
-            return cursor.lastrowid
+            subscription_id = cursor.lastrowid
+
+        return self.get_subscription(subscription_id)
+                                  
+    
