@@ -1,3 +1,4 @@
+
 try:
     from .database import db
 except ImportError:
@@ -7,11 +8,16 @@ except ImportError:
 class MasterXServices:
     """Core business services for MASTER X."""
 
-    def register_user(self, user_id: int, username: str = "", full_name: str = ""):
+    def register_user(
+        self,
+        user_id: int,
+        username: str = "",
+        full_name: str = ""
+    ):
         db.add_user(
             user_id=user_id,
             username=username,
-            full_name=full_name,
+            full_name=full_name
         )
         return db.get_user(user_id)
 
@@ -23,11 +29,13 @@ class MasterXServices:
         user_id: int,
         username: str = "",
         full_name: str = "",
+        display_name: str = ""
     ):
         db.add_guarantor(
             user_id=user_id,
             username=username,
             full_name=full_name,
+            display_name=display_name
         )
         return db.get_guarantor(user_id)
 
@@ -37,35 +45,46 @@ class MasterXServices:
         channel_id: str,
         channel_title: str,
         purpose: str,
-        is_active: bool = False,
+        is_active: bool = False
     ):
-        return db.add_channel(
-            guarantor_user_id=guarantor_user_id,
+        # Ensure the guarantor exists.
+        if not db.get_guarantor(guarantor_user_id):
+            raise ValueError("Guarantor is not registered")
+
+        result = db.add_channel(
             channel_id=channel_id,
-            channel_title=channel_title,
+            title=channel_title,
             purpose=purpose,
-            is_active=is_active,
+            added_by=guarantor_user_id
         )
 
-    def get_channels(self, guarantor_user_id: int):
-        return db.get_channels(guarantor_user_id)
+        if is_active:
+            db.set_channel_active(channel_id, True)
 
-    def activate_channel(self, channel_id: int, is_active: bool):
+        return result
+
+    def get_channels(self, guarantor_user_id: int = None):
+        # The current database schema does not link channels
+        # to individual guarantors.
+        return db.get_channels(active_only=True)
+
+    def activate_channel(self, channel_id: str, is_active: bool):
         return db.set_channel_active(channel_id, is_active)
 
     def add_lot(self, **lot_data):
         required_fields = [
-            "name",
+            "title",
             "description",
             "price",
             "category",
-            "guarantor_user_id",
-            "video_url",
+            "platform",
+            "guarantor_user_id"
         ]
 
         missing = [
             field for field in required_fields
-            if field not in lot_data or lot_data[field] in (None, "")
+            if field not in lot_data
+            or lot_data[field] in (None, "")
         ]
 
         if missing:
@@ -73,29 +92,40 @@ class MasterXServices:
                 "Missing lot fields: " + ", ".join(missing)
             )
 
-        return db.add_lot(**lot_data)
+        return db.add_lot(lot_data)
 
-    def get_lot(self, lot_id: int):
-        return db.get_lot(lot_id)
+    def get_lot(self, lot_code: str):
+        return db.get_lot(lot_code)
 
-    def list_lots(self, status: str = "available", limit: int = 50):
-        return db.list_lots(status=status, limit=limit)
+    def list_lots(
+        self,
+        status: str = "available",
+        category: str = None,
+        limit: int = 50,
+        offset: int = 0
+    ):
+        return db.list_lots(
+            status=status,
+            category=category,
+            limit=limit,
+            offset=offset
+        )
 
-    def update_lot(self, lot_id: int, **updates):
-        return db.update_lot(lot_id, **updates)
+    def update_lot(self, lot_code: str, **updates):
+        return db.update_lot(lot_code, updates)
 
-    def change_lot_status(self, lot_id: int, status: str):
+    def change_lot_status(self, lot_code: str, status: str):
         allowed_statuses = {
             "available",
             "reserved",
             "sold",
-            "inactive",
+            "inactive"
         }
 
         if status not in allowed_statuses:
             raise ValueError("Invalid lot status")
 
-        return db.set_lot_status(lot_id, status)
+        return db.set_lot_status(lot_code, status)
 
     def create_subscription(self, **subscription_data):
         return db.create_subscription(**subscription_data)
@@ -112,23 +142,39 @@ class MasterXServices:
     def record_payment(self, **payment_data):
         return db.add_payment(**payment_data)
 
-    def update_payment(self, payment_id: int, status: str):
+    def update_payment(
+        self,
+        payment_id: int,
+        status: str,
+        confirmed_by: int = None
+    ):
         allowed_statuses = {
             "pending",
             "confirmed",
-            "rejected",
+            "rejected"
         }
 
         if status not in allowed_statuses:
             raise ValueError("Invalid payment status")
 
-        return db.update_payment_status(payment_id, status)
+        return db.update_payment_status(
+            payment_id,
+            status,
+            confirmed_by=confirmed_by
+        )
 
     def record_commission(self, **commission_data):
         return db.add_commission(**commission_data)
 
-    def confirm_commission_paid(self, commission_id: int):
-        return db.mark_commission_paid(commission_id)
+    def confirm_commission_paid(
+        self,
+        commission_id: int,
+        paid_by: int = None
+    ):
+        return db.mark_commission_paid(
+            commission_id,
+            paid_by=paid_by
+        )
 
     def add_bonus(self, **bonus_data):
         return db.add_bonus(**bonus_data)
@@ -142,12 +188,13 @@ class MasterXServices:
     def accept_rules(self, user_id: int, rules_version: str):
         return db.accept_rules(user_id, rules_version)
 
-    def log(self, actor_id: int, action: str, details: str = ""):
+    def log(self, actor_id: int, action: str, details=None):
         return db.log_action(
-            actor_id=actor_id,
+            actor_user_id=actor_id,
             action=action,
-            details=details,
+            details=details or {}
         )
 
 
 services = MasterXServices()
+            
