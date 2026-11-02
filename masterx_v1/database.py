@@ -696,9 +696,13 @@ class Database:
 
         results = []
 
-        for row in rows:
+                for row in rows:
             item = dict(row)
             item["bindings"] = json_decode(
                 item.pop("bindings_json", "{}")
             )
-  
+
+db = Database()
+
+def init_db():
+    db.initialize()
